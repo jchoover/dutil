@@ -20,6 +20,7 @@
 const LPCWSTR BUNDLE_REGISTRATION_REGISTRY_UNINSTALL_KEY = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
 const LPCWSTR BUNDLE_REGISTRATION_REGISTRY_BUNDLE_UPGRADE_CODE = L"BundleUpgradeCode";
 const LPCWSTR BUNDLE_REGISTRATION_REGISTRY_BUNDLE_PROVIDER_KEY = L"BundleProviderKey";
+const LPCWSTR BUNDLE_REGISTRATION_REGISTRY_BUNDLE_VARIABLE_KEY = L"variables";
 
 // Forward declarations.
 /********************************************************************
@@ -29,7 +30,8 @@ NOTE: caller is responsible for closing key
 ********************************************************************/
 static HRESULT OpenBundleKey(
     __in_z LPCWSTR wzBundleId,
-    __in BUNDLE_INSTALL_CONTEXT context, 
+    __in BUNDLE_INSTALL_CONTEXT context,
+    __in_opt LPCWSTR szSubKey,
     __inout HKEY *key);
 
 
@@ -55,8 +57,8 @@ extern "C" HRESULT DAPI BundleGetBundleInfo(
         ButilExitOnFailure(hr = E_INVALIDARG, "An invalid parameter was passed to the function.");
     }
 
-    if (FAILED(hr = OpenBundleKey(wzBundleId, context = BUNDLE_INSTALL_CONTEXT_MACHINE, &hkBundle)) &&
-        FAILED(hr = OpenBundleKey(wzBundleId, context = BUNDLE_INSTALL_CONTEXT_USER, &hkBundle)))
+    if (FAILED(hr = OpenBundleKey(wzBundleId, context = BUNDLE_INSTALL_CONTEXT_MACHINE, NULL, &hkBundle)) &&
+        FAILED(hr = OpenBundleKey(wzBundleId, context = BUNDLE_INSTALL_CONTEXT_USER, NULL, &hkBundle)))
     {
         ButilExitOnFailure(E_FILENOTFOUND == hr ? HRESULT_FROM_WIN32(ERROR_UNKNOWN_PRODUCT) : hr, "Failed to locate bundle uninstall key path.");
     }
@@ -99,6 +101,266 @@ extern "C" HRESULT DAPI BundleGetBundleInfo(
         ButilExitOnFailure(hr, "Failed to copy the property value to the output buffer.");
         
         *pcchValueBuf = cchSource++;        
+    }
+
+LExit:
+    ReleaseRegKey(hkBundle);
+    ReleaseStr(sczValue);
+
+    return hr;
+}
+
+
+extern "C" HRESULT DAPI BundleGetBundleNumericVariable(
+    __in LPCWSTR wzBundleId,
+    __in LPCWSTR wzAttribute,
+    __inout_opt LONGLONG * pllValue
+)
+{
+    HRESULT hr = S_OK;
+    DWORD dwType;
+    LPWSTR sczValue = NULL;
+    DWORD cbData = 0;
+
+    if (wzBundleId && *wzBundleId && wzAttribute && *wzAttribute)
+    {
+        hr = BundleGetBundleVariable(wzBundleId, wzAttribute, &dwType, NULL, &cbData);
+        ButilExitOnFailure(hr, "Failed to read variable type.");
+
+        switch (dwType)
+        {
+        case REG_QWORD:
+            Assert(cbData == sizeof(LONGLONG));
+
+            hr = BundleGetBundleVariable(wzBundleId, wzAttribute, &dwType, pllValue, &cbData);
+            ButilExitOnFailure(hr, "Failed to read variable QWORD.");
+            break;
+
+        case REG_SZ:
+            hr = StrAlloc(&sczValue, cbData);
+            ButilExitOnFailure(hr, "Failed to allocate memory for string variable.");
+
+            hr = BundleGetBundleVariable(wzBundleId, wzAttribute, &dwType, &sczValue, &cbData);
+            ButilExitOnFailure(hr, "Failed to read variable string.");
+
+            hr = StrStringToInt64(sczValue, 0, pllValue);
+            if (FAILED(hr))
+            {
+                hr = DISP_E_TYPEMISMATCH;
+            }
+            break;
+        default:
+            ButilExitOnFailure(hr = E_NOTIMPL, "Reading bundle variable of type 0x%x as number is not implemented.", dwType);
+        }
+    }
+    else
+    {
+        hr = E_INVALIDARG;
+        ButilExitOnFailure(hr, "Invalid agruments to read variable string.");
+    }
+LExit:
+    ReleaseStr(sczValue);
+
+    return hr;
+}
+
+extern "C" HRESULT DAPI BundleGetBundleStringVariable(
+    __in LPCWSTR wzBundleId,
+    __in LPCWSTR wzAttribute,
+    __out_bcount_opt(*pcchData) LPWSTR lpData,
+    __inout_opt LPDWORD pcchData
+)
+{
+    HRESULT hr = S_OK;
+    DWORD dwType;
+    LONGLONG llValue = 0;
+    LPWSTR sczValue = NULL;
+    DWORD cbData = 0;
+
+    if (wzBundleId && *wzBundleId && wzAttribute && *wzAttribute)
+    {
+        hr = BundleGetBundleVariable(wzBundleId, wzAttribute, &dwType, NULL, &cbData);
+        ButilExitOnFailure(hr, "Failed to read shared variable type.");
+
+        switch (dwType)
+        {
+        case REG_QWORD:
+            Assert(cbData == sizeof(LONGLONG));
+
+            hr = BundleGetBundleVariable(wzBundleId, wzAttribute, &dwType, &llValue, &cbData);
+            ButilExitOnFailure(hr, "Failed to read shared variable QWORD.");
+
+            hr = StrAllocFormatted(&sczValue, L"%d", llValue);
+            ButilExitOnFailure(hr, "Failed to allocate shared string variable.");
+
+            hr = ::StringCchLengthW(sczValue, STRSAFE_MAX_CCH, reinterpret_cast<UINT_PTR*>(&cbData));
+            ButilExitOnFailure(hr, "Failed to calculate length of string");
+
+            if (lpData)
+            {
+                if (*pcchData <= cbData)
+                {
+                    *pcchData = ++cbData;
+                    ButilExitOnFailure(hr = HRESULT_FROM_WIN32(ERROR_MORE_DATA), "A buffer is too small to hold the requested data.");
+                }
+                // Safe to copy
+                hr = ::StringCchCatNExW(*reinterpret_cast<LPWSTR*>(lpData), *pcchData, sczValue, cbData, NULL, NULL, STRSAFE_FILL_BEHIND_NULL);
+                ButilExitOnFailure(hr, "Failed to copy the shared variable value to the output buffer.");
+
+                *pcchData = cbData++;
+            }
+            else
+            {
+                *pcchData = cbData++;
+                ButilExitOnFailure(hr = HRESULT_FROM_WIN32(ERROR_SUCCESS), "A buffer is too small to hold the requested data.");
+            }
+            break;
+
+        case REG_SZ:
+            //hr = StrAlloc(&sczValue, cbData);
+            //ExitOnFailure(hr, "Failed to allocate memory for shared string variable.");
+
+            hr = BundleGetBundleVariable(wzBundleId, wzAttribute, &dwType, lpData, pcchData);
+            ButilExitOnFailure(hr, "Failed to read shared variable string.");
+
+            break;
+        default:
+            ButilExitOnFailure(hr = E_NOTIMPL, "Reading bundle shared variable of type 0x%x as string is not implemented.", dwType);
+        }
+    }
+    else
+    {
+        hr = E_INVALIDARG;
+    }
+LExit:
+    ReleaseStr(sczValue);
+
+    return hr;
+}
+
+/********************************************************************
+BundleGetBundleVariable - Queries the bundle installation metadata for a given variable
+
+RETURNS:
+E_INVALIDARG
+An invalid parameter was passed to the function.
+HRESULT_FROM_WIN32(ERROR_UNKNOWN_PRODUCT)
+The bundle is not installed
+HRESULT_FROM_WIN32(ERROR_UNKNOWN_PROPERTY)
+The shared variable is unrecognized
+HRESULT_FROM_WIN32(ERROR_MORE_DATA)
+A buffer is too small to hold the requested data.
+HRESULT_FROM_WIN32(ERROR_SUCCESS)
+When probing for a string variable, if no data pointer is passed but the size is and the variable is found.
+E_NOTIMPL:
+Tried to read a bundle variable for a type which has not been implemented
+
+All other returns are unexpected returns from other dutil methods.
+********************************************************************/
+extern "C" HRESULT DAPI BundleGetBundleVariable(
+    __in LPCWSTR wzBundleId,
+    __in LPCWSTR wzAttribute,
+    __out_opt LPDWORD pdwType,
+    __out_bcount_opt(*pcbData) PVOID pvData,
+    __inout_opt LPDWORD pcbData
+)
+{
+    Assert(wzBundleId && wzAttribute);
+
+    HRESULT hr = S_OK;
+    BUNDLE_INSTALL_CONTEXT context = BUNDLE_INSTALL_CONTEXT_MACHINE;
+    LPWSTR sczValue = NULL;
+    HKEY hkBundle = NULL;
+    DWORD cbData = 0;
+    DWORD dwType = 0;
+    DWORD64 qwValue = 0;
+
+    if (!wzBundleId || !wzAttribute || (pvData && !pcbData))
+    {
+        ButilExitOnFailure(hr = E_INVALIDARG, "An invalid parameter was passed to the function.");
+    }
+
+    if (FAILED(hr = OpenBundleKey(wzBundleId, context = BUNDLE_INSTALL_CONTEXT_MACHINE, BUNDLE_REGISTRATION_REGISTRY_BUNDLE_VARIABLE_KEY, &hkBundle)) &&
+        FAILED(hr = OpenBundleKey(wzBundleId, context = BUNDLE_INSTALL_CONTEXT_USER, BUNDLE_REGISTRATION_REGISTRY_BUNDLE_VARIABLE_KEY, &hkBundle)))
+    {
+        ButilExitOnFailure(E_FILENOTFOUND == hr ? HRESULT_FROM_WIN32(ERROR_UNKNOWN_PRODUCT) : hr, "Failed to locate bundle uninstall key variable path.");
+    }
+
+    // If the bundle doesn't have the shared variable defined, return ERROR_UNKNOWN_PROPERTY
+    hr = RegGetType(hkBundle, wzAttribute, &dwType);
+    ButilExitOnFailure(E_FILENOTFOUND == hr ? HRESULT_FROM_WIN32(ERROR_UNKNOWN_PROPERTY) : hr, "Failed to locate bundle shared variable.");
+
+    if (pdwType)
+    {
+        *pdwType = dwType;
+    }
+
+    switch (dwType)
+    {
+    case REG_SZ:
+        if (pcbData)
+        {
+            hr = RegReadString(hkBundle, wzAttribute, &sczValue);
+            ButilExitOnFailure(hr, "Failed to read string shared variable.");
+
+            hr = ::StringCchLengthW(sczValue, STRSAFE_MAX_CCH, reinterpret_cast<UINT_PTR*>(&cbData));
+            ButilExitOnFailure(hr, "Failed to calculate length of string");
+
+            if (pvData)
+            {
+                if (*pcbData <= cbData)
+                {
+                    *pcbData = ++cbData;
+                    ButilExitOnFailure(hr = HRESULT_FROM_WIN32(ERROR_MORE_DATA), "A buffer is too small to hold the requested data.");
+                }
+                // Safe to copy
+                hr = ::StringCchCatNExW(*reinterpret_cast<LPWSTR*>(pvData), *pcbData, sczValue, cbData, NULL, NULL, STRSAFE_FILL_BEHIND_NULL);
+                ButilExitOnFailure(hr, "Failed to copy the shared variable value to the output buffer.");
+
+                *pcbData = ++cbData;
+            }
+            else
+            {
+                *pcbData = ++cbData;
+                ButilExitOnFailure(hr = HRESULT_FROM_WIN32(ERROR_SUCCESS), "A buffer is too small to hold the requested data.");
+            }
+        }
+
+        break;
+    case REG_QWORD:
+        if (pcbData)
+        {
+            hr = RegReadQword(hkBundle, wzAttribute, &qwValue);
+            ButilExitOnFailure(hr, "Failed to read qword shared variable.");
+
+            if (pvData)
+            {
+                if (*pcbData < sizeof(DWORD64))
+                {
+                    *pcbData = sizeof(DWORD64);
+                    ButilExitOnFailure(hr = HRESULT_FROM_WIN32(ERROR_MORE_DATA), "A numeric buffer is too small to hold the requested data.");
+                }
+                else if (*pcbData > sizeof(DWORD64))
+                {
+                    *pcbData = sizeof(DWORD64);
+                    ButilExitOnFailure(hr = E_INVALIDARG, "A numeric buffer is too large to hold the requested data.");
+                }
+
+                *reinterpret_cast<DWORD64*>(pvData) = qwValue;
+            }
+            else
+            {
+                if (*pcbData < sizeof(DWORD64))
+                {
+                    *pcbData = sizeof(DWORD64);
+                    ButilExitOnFailure(hr = HRESULT_FROM_WIN32(ERROR_SUCCESS), "A numeric buffer is too small to hold the requested data.");
+                }
+            }
+        }
+        break;
+    default:
+        ButilExitOnFailure(hr = E_NOTIMPL, "Reading bundle shared variable of type 0x%x not implemented.", dwType);
+
     }
 
 LExit:
@@ -234,7 +496,8 @@ LExit:
 
 HRESULT OpenBundleKey(
     __in_z LPCWSTR wzBundleId,
-    __in BUNDLE_INSTALL_CONTEXT context, 
+    __in BUNDLE_INSTALL_CONTEXT context,
+    __in_opt LPCWSTR szSubKey,
     __inout HKEY *key)
 {
     Assert(key && wzBundleId);
@@ -244,7 +507,14 @@ HRESULT OpenBundleKey(
     HKEY hkRoot = BUNDLE_INSTALL_CONTEXT_USER == context ? HKEY_CURRENT_USER : HKEY_LOCAL_MACHINE;
     LPWSTR sczKeypath = NULL;
 
-    hr = StrAllocFormatted(&sczKeypath, L"%ls\\%ls", BUNDLE_REGISTRATION_REGISTRY_UNINSTALL_KEY, wzBundleId);
+    if (szSubKey)
+    {
+        hr = StrAllocFormatted(&sczKeypath, L"%ls\\%ls\\%ls", BUNDLE_REGISTRATION_REGISTRY_UNINSTALL_KEY, wzBundleId, szSubKey);
+    }
+    else
+    {
+        hr = StrAllocFormatted(&sczKeypath, L"%ls\\%ls", BUNDLE_REGISTRATION_REGISTRY_UNINSTALL_KEY, wzBundleId);
+    }
     ButilExitOnFailure(hr, "Failed to allocate bundle uninstall key path.");
     
     hr = RegOpen(hkRoot, sczKeypath, KEY_READ, key);
