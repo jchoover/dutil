@@ -11,7 +11,12 @@ namespace DutilTests
     public ref class DUtil
     {
     public:
-        [Fact(Skip="Skipped it's not working and I don't care.")]
+        DUtil(Abstractions::ITestOutputHelper^ output)
+        {
+            this->output = output;
+        }
+
+        [Fact]
         void DUtilTraceErrorSourceFiltersOnTraceLevel()
         {
             DutilInitialize(&DutilTestTraceError);
@@ -22,13 +27,17 @@ namespace DutilTests
 
             Action^ action = gcnew Action(this, &DUtil::CallDutilTraceErrorSource);
             Assert::Throws<Exception^>(action);
-
+            
             DutilUninitialize();
         }
 
     private:
+        Abstractions::ITestOutputHelper^ output;
+
         void CallDutilTraceErrorSource()
         {
+            
+            output->WriteLine(System::String::Format(L"TraceErrorSource, TraceLevel = {0}.", (Int32)Dutil_TraceGetLevel()));
             Dutil_TraceErrorSource(__FILE__, __LINE__, REPORT_DEBUG, DUTIL_SOURCE_EXTERNAL, E_FAIL, "Error message");
         }
     };
